@@ -1,9 +1,7 @@
 import streamlit as st
 from langchain_groq import ChatGroq
-from langchain_community.tools import DuckDuckGoSearchRun
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import HumanMessage
+from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Live Web Agent", layout="centered")
 
@@ -12,13 +10,29 @@ st.write("Ask me anything about current events. I will browse the web to find th
 
 # --- GET API KEY FROM SECRETS ---
 try:
-    # Try to get API key from Streamlit Secrets
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except Exception as e:
     st.error("⚠️ Groq API Key not found in Secrets. Please add it in the Streamlit Cloud dashboard.")
     st.info("Go to your app → ⋮ (three dots) → Settings → Secrets → Add:")
     st.code('GROQ_API_KEY = "your-groq-api-key-here"', language="toml")
     st.stop()
+
+# Simple web search function using direct DDGS
+def simple_web_search(query):
+    """Simple web search using DuckDuckGo directly"""
+    try:
+        with DDGS() as ddgs:
+            results = []
+            # Get text search results
+            for r in ddgs.text(query, max_results=3):
+                results.append(f"• {r.get('title', '')}: {r.get('body', '')[:200]}...")
+            
+            if results:
+                return "Here's what I found:\n\n" + "\n\n".join(results)
+            else:
+                return f"I couldn't find specific results for '{query}'."
+    except Exception as e:
+        return f"Search encountered an issue: {str(e)}"
 
 # --- 1. SIDEBAR CONFIGURATION ---
 with st.sidebar:
@@ -38,102 +52,65 @@ with st.sidebar:
     st.header("🛠️ Tool Control")
     use_search = st.toggle("Enable Web Search", value=True)
     if use_search:
-        st.success("🌐 Web Search is **ON** - I'll search the internet for answers")
+        st.success("🌐 Web Search is **ON** - I'll search the internet")
     else:
-        st.info("💬 Web Search is **OFF** - I'll answer from my knowledge only")
+        st.info("💬 Web Search is **OFF** - Knowledge only")
     
     st.divider()
-    st.caption("🔑 API Key is securely stored in Secrets")
+    st.caption("🔑 API Key stored in Secrets")
 
-# --- 2. THE MEMORY VAULT ---
+# --- 2. MEMORY ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- 3. DRAW THE CHAT HISTORY ---
+# --- 3. DISPLAY HISTORY ---
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- 4. THE CORE AGENTIC LOOP ---
+# --- 4. MAIN LOOP ---
 if user_query := st.chat_input("Ask about today's news..."):
     
-    # A. Display User Message
+    # Add user message
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
 
-    # B. Initialize the LangGraph Agent Engine with secret key
+    # Initialize LLM
     llm = ChatGroq(
-        temperature=0, 
+        temperature=0.7, 
         model_name=model_option,
-        api_key=GROQ_API_KEY  # Using the secret from above
+        groq_api_key=GROQ_API_KEY  # Note: parameter is groq_api_key, not api_key
     )
     
-    # Create the search tool
-    web_tool = DuckDuckGoSearchRun()
-    
-    # Tool toggle logic
-    if use_search:
-        active_tools = [web_tool]
-        tool_status = "with web search enabled"
-    else:
-        active_tools = []
-        tool_status = "with web search disabled (knowledge only)"
-    
-    # System prompts
-    if use_search:
-        sys_prompt = """You are a live research assistant. 
-        You have access to a web search tool. 
-        You MUST use the web search tool to find current information before answering.
-        
-        When you receive a question:
-        1. First, use the web search tool to find relevant information
-        2. Then, synthesize the results into a clear, accurate answer
-        3. Always cite your sources when possible"""
-    else:
-        sys_prompt = """You are a helpful AI assistant.
-        You do not have access to web search in this mode.
-        Answer questions based on your training knowledge only.
-        If you don't know something, simply say so."""
-    
-    # Create agent
-    agent = create_react_agent(
-        llm, 
-        tools=active_tools,
-        prompt=sys_prompt,
-        checkpointer=MemorySaver()
-    )
-
-    # Prepare messages
-    langgraph_messages = [SystemMessage(content=sys_prompt)]
-    for m in st.session_state.messages:
-        if m["role"] == "user":
-            langgraph_messages.append(HumanMessage(content=m["content"]))
-        else:
-            langgraph_messages.append(AIMessage(content=m["content"]))
-
-    # Execute agent
+    # Get response
     with st.chat_message("assistant"):
-        with st.spinner(f"🤖 Thinking {tool_status}..."):
+        with st.spinner("🤔 Thinking..."):
             try:
-                result_state = agent.invoke({
-                    "messages": langgraph_messages
-                }, config={"configurable": {"thread_id": "1"}})
-                
-                final_messages = result_state["messages"]
-                bot_answer = final_messages[-1].content if final_messages else "No answer found."
-                
-            except Exception as e:
+                # If search is enabled, get search results first
                 if use_search:
-                    try:
-                        search_result = web_tool.run(user_query)
-                        bot_answer = f"**Search Results:**\n\n{search_result}"
-                    except:
-                        bot_answer = f"I encountered an error: {str(e)}"
+                    search_results = simple_web_search(user_query)
+                    
+                    # Create prompt with search results
+                    enhanced_prompt = f"""Search results: {search_results}
+
+Based on the search results above, please answer this question: {user_query}
+
+If the search results don't contain enough information, just answer based on your knowledge."""
+                    
+                    messages = [HumanMessage(content=enhanced_prompt)]
+                    response = llm.invoke(messages)
+                    bot_answer = response.content
                 else:
-                    bot_answer = f"I encountered an error: {str(e)}"
-        
-        st.markdown(bot_answer)
+                    # No search, just use the LLM directly
+                    messages = [HumanMessage(content=user_query)]
+                    response = llm.invoke(messages)
+                    bot_answer = response.content
+                    
+            except Exception as e:
+                bot_answer = f"I encountered an error: {str(e)}"
+            
+            st.markdown(bot_answer)
     
     # Save response
     st.session_state.messages.append({"role": "assistant", "content": bot_answer})
