@@ -1,10 +1,6 @@
-# Let pip find compatible versions
 streamlit
-langchain
 langchain-groq
-langchain-community
 langgraph
-groq
-duckduckgo-search
-pydantic
 requests
+beautifulsoup4
+groq
